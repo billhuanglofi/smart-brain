@@ -15,8 +15,11 @@ venv/
 env/
 .env/
 
-# Generated index artifacts (rebuilt by CI or locally via scripts/ingest.py)
+# Generated index artifacts (rebuilt locally via scripts/ingest.py)
 index/
+
+# ChromaDB persistent storage
+chroma_db/
 
 # Jupyter
 .ipynb_checkpoints/

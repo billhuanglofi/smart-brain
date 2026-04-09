@@ -1,16 +1,23 @@
 """
-search.py – search the knowledge-base index built by scripts/ingest.py.
+search.py – search the knowledge-base index.
 
 Usage
 -----
+    # Search ChromaDB (recommended – built after running upload.py)
+    python scripts/search.py "your query" --db-path ./chroma_db
+
+    # Keyword / semantic search over legacy JSONL index (built by ingest.py)
     python scripts/search.py "your query" [--top-k 5] [--index-dir index] [--category jira]
 
-The script supports two search modes:
+The script supports three search modes:
 
-  1. **Keyword (default)** – simple BM25-style TF-IDF ranking using only the
-     standard library.  No extra dependencies required.
+  1. **ChromaDB (default when --db-path is given)** – uses the embeddings stored
+     in the local vector database populated by scripts/upload.py.
 
-  2. **Semantic** – cosine-similarity over sentence embeddings.  Requires
+  2. **Keyword (default when --index-dir is used)** – simple BM25-style TF-IDF
+     ranking using only the standard library.  No extra dependencies required.
+
+  3. **Semantic** – cosine-similarity over sentence embeddings.  Requires
      ``sentence-transformers`` and ``numpy`` to be installed
      (``pip install sentence-transformers numpy``).  Activated automatically
      when those packages are present and ``--semantic`` flag is passed.
@@ -20,7 +27,7 @@ Output format
 Results are printed as JSON lines, each containing the chunk record plus a
 "score" field.  This makes it easy to pipe results into another tool:
 
-    python scripts/search.py "authentication flow" --top-k 3 | python your_tool.py
+    python scripts/search.py "authentication flow" --db-path ./chroma_db --top-k 3 | python your_tool.py
 """
 
 from __future__ import annotations
@@ -64,6 +71,68 @@ def _load_chunks(index_dir: Path, category: str | None = None) -> list[dict]:
                 continue
             chunks.append(chunk)
     return chunks
+
+
+# ---------------------------------------------------------------------------
+# ChromaDB search
+# ---------------------------------------------------------------------------
+
+def _chromadb_search(
+    query: str,
+    db_path: str,
+    collection_name: str,
+    top_k: int,
+    category: str | None,
+) -> list[dict[str, Any]]:
+    """Query the local ChromaDB vector database and return top-k results."""
+    try:
+        import chromadb  # type: ignore
+    except ImportError:
+        print(
+            "[ERROR] chromadb is not installed.\n"
+            "Install it with:  pip install chromadb",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    client = chromadb.PersistentClient(path=db_path)
+    try:
+        collection = client.get_collection(name=collection_name)
+    except Exception:
+        print(
+            f"[ERROR] Collection '{collection_name}' not found in '{db_path}'.\n"
+            "Run  python scripts/upload.py  first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    where: dict | None = {"category": category} if category else None
+    kwargs: dict[str, Any] = {"query_texts": [query], "n_results": top_k}
+    if where:
+        kwargs["where"] = where
+
+    results = collection.query(**kwargs)
+
+    output = []
+    ids = (results.get("ids") or [[]])[0]
+    docs = (results.get("documents") or [[]])[0]
+    metas = (results.get("metadatas") or [[]])[0]
+    distances = (results.get("distances") or [[]])[0]
+
+    for chunk_id, doc, meta, dist in zip(ids, docs, metas, distances):
+        # ChromaDB returns L2 or cosine *distance*; convert to a similarity score
+        score = round(1.0 - dist, 6)
+        output.append({
+            "id": chunk_id,
+            "source": meta.get("source", ""),
+            "category": meta.get("category", ""),
+            "title": meta.get("title", ""),
+            "text": doc,
+            "metadata": {k: v for k, v in meta.items() if k not in ("source", "category", "title")},
+            "score": score,
+        })
+
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -144,20 +213,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Search the smart-brain knowledge index.")
     parser.add_argument("query", help="Search query string.")
     parser.add_argument("--top-k", type=int, default=5, help="Number of results to return (default: 5).")
-    parser.add_argument("--index-dir", default="index", help="Directory containing chunks.jsonl.")
+    parser.add_argument("--db-path", default=None, help="Path to ChromaDB directory (created by upload.py). When provided, ChromaDB search is used.")
+    parser.add_argument("--collection", default="knowledge", help="ChromaDB collection name (default: knowledge).")
+    parser.add_argument("--index-dir", default="index", help="Directory containing chunks.jsonl (legacy JSONL mode).")
     parser.add_argument("--category", default=None, help="Filter by category (e.g. jira, confluence, general).")
-    parser.add_argument("--semantic", action="store_true", help="Use sentence-embedding based search.")
+    parser.add_argument("--semantic", action="store_true", help="Use sentence-embedding based search (JSONL mode only).")
     args = parser.parse_args()
 
-    chunks = _load_chunks(Path(args.index_dir), category=args.category)
-    if not chunks:
-        print("No chunks found (empty index or category filter matched nothing).", file=sys.stderr)
-        sys.exit(0)
-
-    if args.semantic:
-        results = _semantic_search(args.query, chunks, args.top_k)
+    if args.db_path:
+        results = _chromadb_search(
+            query=args.query,
+            db_path=args.db_path,
+            collection_name=args.collection,
+            top_k=args.top_k,
+            category=args.category,
+        )
     else:
-        results = _keyword_search(args.query, chunks, args.top_k)
+        chunks = _load_chunks(Path(args.index_dir), category=args.category)
+        if not chunks:
+            print("No chunks found (empty index or category filter matched nothing).", file=sys.stderr)
+            sys.exit(0)
+
+        if args.semantic:
+            results = _semantic_search(args.query, chunks, args.top_k)
+        else:
+            results = _keyword_search(args.query, chunks, args.top_k)
 
     for result in results:
         print(json.dumps(result, ensure_ascii=False))

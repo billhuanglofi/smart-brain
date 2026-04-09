@@ -1,12 +1,12 @@
 """
-ingest.py – process knowledge files (Excel & Markdown) into a JSONL chunk index.
+ingest.py – process knowledge files (Excel, Markdown, CSV) into a JSONL chunk index.
 
 Usage
 -----
     python scripts/ingest.py [--knowledge-dir knowledge] [--output-dir index]
 
-The script walks every sub-directory of *knowledge_dir*, detects .md, .xlsx and
-.xls files, splits them into overlapping text chunks, and writes each chunk as a
+The script walks every sub-directory of *knowledge_dir*, detects .md, .xlsx, .xls
+and .csv files, splits them into overlapping text chunks, and writes each chunk as a
 single JSON line to *output_dir*/chunks.jsonl.
 
 Each chunk record contains:
@@ -127,6 +127,41 @@ def _parse_excel(path: Path) -> Iterator[dict]:
 
 
 # ---------------------------------------------------------------------------
+# CSV parser
+# ---------------------------------------------------------------------------
+
+def _parse_csv(path: Path) -> Iterator[dict]:
+    """Yield chunk dicts from a CSV file."""
+    try:
+        import pandas as pd  # type: ignore
+    except ImportError:
+        print(f"[WARN] pandas not installed – skipping {path}", file=sys.stderr)
+        return
+
+    try:
+        df = pd.read_csv(path, dtype=str).fillna("")
+    except Exception as exc:
+        print(f"[WARN] Could not read {path}: {exc}", file=sys.stderr)
+        return
+
+    rows_text = []
+    for _, row in df.iterrows():
+        parts = [f"{col}: {val}" for col, val in row.items() if str(val).strip()]
+        if parts:
+            rows_text.append("  |  ".join(parts))
+
+    full_text = "\n".join(rows_text)
+    for chunk in _split_text(full_text):
+        yield {
+            "id": _sha256(chunk),
+            "source": str(path),
+            "title": path.stem,
+            "text": chunk,
+            "metadata": {},
+        }
+
+
+# ---------------------------------------------------------------------------
 # Main ingestion loop
 # ---------------------------------------------------------------------------
 
@@ -134,6 +169,7 @@ PARSERS = {
     ".md": _parse_markdown,
     ".xlsx": _parse_excel,
     ".xls": _parse_excel,
+    ".csv": _parse_csv,
 }
 
 

@@ -8,17 +8,27 @@ This directory holds the company's knowledge base that feeds the **smart-brain**
 |---------------|-------------------------------------------------------|
 | `jira/`       | Exported Jira tickets, epics, or sprint summaries     |
 | `confluence/` | Confluence pages exported as Markdown or Excel        |
-| `general/`    | Any other Markdown or Excel documents                 |
+| `general/`    | Any other Markdown, Excel, or CSV documents           |
 
 ## Supported file formats
 
 * **Markdown** (`.md`) – write or paste Confluence/Jira exports directly
-* **Excel** (`.xlsx`, `.xls`) – upload spreadsheets exported from Jira/Confluence
+* **Excel** (`.xlsx`, `.xls`) – spreadsheets exported from Jira/Confluence
+* **CSV** (`.csv`) – tabular exports from any tool
 
 ## How to add new knowledge
 
-1. Drop your `.md` or `.xlsx` file into the appropriate subfolder.
-2. Commit and push.  The [GitHub Actions workflow](../.github/workflows/index.yml)
-   will automatically re-index the knowledge base.
-3. Optionally pull the updated `index/chunks.jsonl` in your AI tool and rebuild
-   your local vector store.
+Drop your file into the appropriate subfolder and run `upload.py` from your
+laptop to push it into the local ChromaDB vector database:
+
+```bash
+# Upload a single file
+python scripts/upload.py knowledge/jira/my_ticket.md
+
+# Upload everything in a folder at once
+python scripts/upload.py knowledge/
+
+# Fetch directly from Jira or Confluence (no file needed)
+python scripts/upload.py --jira PROJ-123
+python scripts/upload.py --confluence https://your-company.atlassian.net/wiki/spaces/ENG/pages/123456
+```
