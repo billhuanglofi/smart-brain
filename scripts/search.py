@@ -41,6 +41,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+_scripts_dir = Path(__file__).resolve().parent
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+
+from _embedding import get_embedding_function  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -97,7 +103,7 @@ def _chromadb_search(
 
     client = chromadb.PersistentClient(path=db_path)
     try:
-        collection = client.get_collection(name=collection_name)
+        collection = client.get_collection(name=collection_name, embedding_function=get_embedding_function())
     except Exception:
         print(
             f"[ERROR] Collection '{collection_name}' not found in '{db_path}'.\n"

@@ -21,6 +21,9 @@ index/
 # ChromaDB persistent storage
 chroma_db/
 
+# Embedding model weights (downloaded once by scripts/setup.py; ~90 MB per model)
+models/
+
 # Jupyter
 .ipynb_checkpoints/
 

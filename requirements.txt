@@ -5,6 +5,10 @@ markdown>=3.5.0          # convert Markdown to plain text
 beautifulsoup4>=4.12.0   # strip HTML tags from rendered Markdown
 pandas>=2.0.0            # tabular data helpers for Excel and CSV
 
+# Embedding model (used for all vector operations)
+sentence-transformers>=2.7.0
+numpy>=1.26.0
+
 # Vector database (local, no server required)
 chromadb>=0.4.0
 
@@ -16,7 +20,3 @@ python-dotenv>=1.0.0
 
 # HTTP server (optional – only needed when running scripts/serve.py)
 flask>=3.0.0
-
-# Embedding-based search (optional – install when you need semantic search over JSONL)
-# sentence-transformers>=2.7.0
-# numpy>=1.26.0

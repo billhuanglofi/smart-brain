@@ -70,6 +70,7 @@ if str(_scripts_dir) not in sys.path:
     sys.path.insert(0, str(_scripts_dir))
 
 from ingest import PARSERS, _sha256, _split_text  # noqa: E402
+from _embedding import get_embedding_function  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +88,9 @@ def _get_collection(db_path: str, collection_name: str, embedding_function=None)
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if embedding_function is None:
+        embedding_function = get_embedding_function()
 
     client = chromadb.PersistentClient(path=db_path)
     kwargs: dict = {"name": collection_name, "metadata": {"hnsw:space": "cosine"}}
@@ -108,8 +112,9 @@ def upsert_chunks(
     ----------
     embedding_function:
         Optional ChromaDB-compatible embedding function.  When *None* (default),
-        ChromaDB uses its built-in model (downloads once, then cached locally).
-        Pass a custom function in tests to avoid network calls.
+        ``get_embedding_function()`` is used (local model if setup.py was run,
+        otherwise downloads on first use).  Pass a custom function in tests to
+        avoid network calls.
     """
     if not chunks:
         return 0

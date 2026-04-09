@@ -10,16 +10,18 @@ your machine — no cloud services, no GitHub Actions required.
 ## Table of contents
 
 1. [Repository layout](#repository-layout)
-2. [Quick start](#quick-start)
-3. [Uploading knowledge](#uploading-knowledge)
+2. [First-time setup](#first-time-setup)
+3. [Quick start](#quick-start)
+4. [Uploading knowledge](#uploading-knowledge)
    - [Upload a local file](#upload-a-local-file)
    - [Upload an entire directory](#upload-an-entire-directory)
    - [Fetch a Jira issue](#fetch-a-jira-issue)
    - [Fetch a Confluence page](#fetch-a-confluence-page)
-4. [Searching the database](#searching-the-database)
-5. [HTTP API server](#http-api-server)
-6. [Integration with the code-review AI tool](#integration-with-the-code-review-ai-tool)
-7. [Running tests](#running-tests)
+5. [Searching the database](#searching-the-database)
+6. [Migrating to a new machine](#migrating-to-a-new-machine)
+7. [HTTP API server](#http-api-server)
+8. [Integration with the code-review AI tool](#integration-with-the-code-review-ai-tool)
+9. [Running tests](#running-tests)
 
 ---
 
@@ -31,9 +33,14 @@ smart-brain/
 │   ├── jira/          ← drop Jira exports (.md, .xlsx, .csv) here
 │   ├── confluence/    ← drop Confluence exports here
 │   └── general/       ← any other internal docs
+├── models/            ← gitignored; populated once by scripts/setup.py
+│   └── all-MiniLM-L6-v2/   ← the embedding model (~90 MB)
 ├── scripts/
-│   ├── upload.py      ← PRIMARY TOOL – upload files / Jira / Confluence → ChromaDB
+│   ├── setup.py       ← STEP 1 – download the embedding model into models/
+│   ├── upload.py      ← STEP 2 – upload files / Jira / Confluence → ChromaDB
 │   ├── search.py      ← search ChromaDB or the legacy JSONL index
+│   ├── db.py          ← export / import for migration between machines
+│   ├── _embedding.py  ← shared embedding-function helper (used internally)
 │   ├── ingest.py      ← batch-build a flat JSONL index (optional)
 │   ├── serve.py       ← lightweight HTTP API over ChromaDB (optional)
 │   └── tests_scripts.py
@@ -44,7 +51,9 @@ smart-brain/
 
 ---
 
-## Quick start
+## First-time setup
+
+Run these steps **once** on every laptop where you use smart-brain.
 
 ```bash
 # 1. Clone
@@ -54,19 +63,29 @@ cd smart-brain
 # 2. Install Python dependencies
 pip install -r requirements.txt
 
-# 3. Copy and fill in Jira / Confluence credentials (only needed for remote fetch)
+# 3. Download the embedding model into models/
+#    (~90 MB, downloaded once, then fully offline)
+python scripts/setup.py
+
+# 4. Copy and fill in Jira / Confluence credentials
 cp .env.example .env
 # edit .env with your JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN …
-
-# 4. Upload your first document
-python scripts/upload.py /path/to/your/doc.md
-
-# 5. Search
-python scripts/search.py "authentication flow" --db-path ./chroma_db
 ```
 
-> **First run note**: ChromaDB will download a small embedding model (~90 MB) and
-> cache it in `~/.cache/chroma/`.  This only happens once.
+After step 3, the model lives in `models/all-MiniLM-L6-v2/` inside the repo.
+All subsequent uploads and searches are **fully offline**.
+
+---
+
+## Quick start
+
+```bash
+# Upload a document
+python scripts/upload.py /path/to/your/doc.md
+
+# Search
+python scripts/search.py "authentication flow" --db-path ./chroma_db
+```
 
 ---
 
@@ -157,6 +176,59 @@ Results are printed as JSON lines:
 
 ---
 
+## Migrating to a new machine
+
+The `db.py` script exports all knowledge to a plain JSONL file that can be
+moved between machines, committed to git, or imported into a different vector
+database in the future.
+
+### Export from the old machine
+
+```bash
+python scripts/db.py export
+# → writes knowledge_snapshot.jsonl (one JSON record per chunk)
+```
+
+```bash
+# Custom output file or DB location
+python scripts/db.py export --output team_snapshot.jsonl
+python scripts/db.py export --output backup.jsonl --db-path /path/to/chroma_db
+```
+
+### Copy the snapshot
+
+The generated `knowledge_snapshot.jsonl` is plain text — copy it however you like:
+
+```bash
+# Option A: commit to git (if the file is small enough)
+git add knowledge_snapshot.jsonl && git commit -m "chore: update knowledge snapshot"
+
+# Option B: copy manually
+cp knowledge_snapshot.jsonl /shared/drive/
+scp knowledge_snapshot.jsonl user@new-machine:~/smart-brain/
+```
+
+### Import on the new machine
+
+```bash
+# After cloning and running first-time setup on the new machine:
+python scripts/db.py import knowledge_snapshot.jsonl
+```
+
+The import rebuilds all vector embeddings from the raw text in the snapshot,
+so it works even after upgrading the embedding model.
+
+### Why JSONL and not a ChromaDB directory copy?
+
+| | ChromaDB folder copy | JSONL snapshot |
+|---|---|---|
+| Portable between OS/arch | ❌ (SQLite binary) | ✅ |
+| Human-readable / diffable | ❌ | ✅ |
+| Can move to Qdrant/pgvector | ❌ | ✅ |
+| Includes raw text for re-embedding | ❌ | ✅ |
+
+---
+
 ## HTTP API server
 
 The optional Flask server exposes the knowledge base over HTTP so your
@@ -243,9 +315,10 @@ import sys
 sys.path.insert(0, "/path/to/smart-brain/scripts")
 
 import chromadb
+from _embedding import get_embedding_function
 
 client = chromadb.PersistentClient(path="/path/to/smart-brain/chroma_db")
-collection = client.get_collection("knowledge")
+collection = client.get_collection("knowledge", embedding_function=get_embedding_function())
 results = collection.query(query_texts=[pr_diff[:500]], n_results=5)
 context = "\n".join(results["documents"][0])
 ```
@@ -258,4 +331,5 @@ context = "\n".join(results["documents"][0])
 pip install pytest
 pytest scripts/tests_scripts.py -v
 ```
+
 

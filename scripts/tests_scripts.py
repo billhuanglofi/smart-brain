@@ -1,5 +1,6 @@
 """
-tests for scripts/ingest.py, scripts/search.py, and scripts/upload.py
+tests for scripts/ingest.py, scripts/search.py, scripts/upload.py,
+scripts/_embedding.py, scripts/setup.py, and scripts/db.py
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ from upload import (  # noqa: E402
     parse_file,
     upsert_chunks,
 )
+from _embedding import LOCAL_MODEL_PATH, MODEL_NAME, get_embedding_function  # noqa: E402
+from db import export_db, import_db  # noqa: E402
+from setup import download_model  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -398,4 +402,216 @@ class TestUpsertChunks:
         client = chromadb.PersistentClient(path=db_path)
         col = client.get_collection("test_col")
         assert col.count() == 5
+
+
+# ---------------------------------------------------------------------------
+# _embedding helpers
+# ---------------------------------------------------------------------------
+
+class TestEmbeddingHelper:
+    def test_model_name_is_defined(self):
+        assert MODEL_NAME == "all-MiniLM-L6-v2"
+
+    def test_local_model_path_is_inside_repo(self):
+        # LOCAL_MODEL_PATH must be a descendant of the repo root
+        repo_root = LOCAL_MODEL_PATH.parent.parent
+        assert LOCAL_MODEL_PATH.is_relative_to(repo_root)
+        assert LOCAL_MODEL_PATH.name == MODEL_NAME
+
+    def test_get_embedding_function_returns_callable(self, monkeypatch):
+        # Patch LOCAL_MODEL_PATH to a non-existent path so we exercise the fallback
+        import _embedding as emb
+        monkeypatch.setattr(emb, "LOCAL_MODEL_PATH", Path("/nonexistent/path"))
+
+        # Mock SentenceTransformerEmbeddingFunction to avoid a network call
+        class _FakeEF:
+            def __init__(self, model_name):
+                self.model_name = model_name
+            def __call__(self, inputs):
+                return [[0.1] for _ in inputs]
+
+        import chromadb.utils.embedding_functions.sentence_transformer_embedding_function as st_mod
+        monkeypatch.setattr(st_mod, "SentenceTransformerEmbeddingFunction", _FakeEF)
+
+        ef = get_embedding_function()
+        assert callable(ef)
+        assert ef.model_name == MODEL_NAME  # fell back to online name
+
+    def test_get_embedding_function_uses_local_path(self, monkeypatch, tmp_path):
+        # Create a fake local model directory
+        fake_model_dir = tmp_path / MODEL_NAME
+        fake_model_dir.mkdir()
+
+        import _embedding as emb
+        monkeypatch.setattr(emb, "LOCAL_MODEL_PATH", fake_model_dir)
+
+        class _FakeEF:
+            def __init__(self, model_name):
+                self.model_name = model_name
+            def __call__(self, inputs):
+                return [[0.1] for _ in inputs]
+
+        import chromadb.utils.embedding_functions.sentence_transformer_embedding_function as st_mod
+        monkeypatch.setattr(st_mod, "SentenceTransformerEmbeddingFunction", _FakeEF)
+
+        ef = get_embedding_function()
+        assert ef.model_name == str(fake_model_dir)  # uses local path, not MODEL_NAME
+
+
+# ---------------------------------------------------------------------------
+# setup.py
+# ---------------------------------------------------------------------------
+
+class TestSetupDownloadModel:
+    def test_download_is_idempotent(self, monkeypatch, tmp_path, capsys):
+        """If the local model directory already exists, setup.py skips the download."""
+        import setup as setup_mod
+
+        fake_model_dir = tmp_path / MODEL_NAME
+        fake_model_dir.mkdir()
+        monkeypatch.setattr(setup_mod, "LOCAL_MODEL_PATH", fake_model_dir)
+
+        download_model_patched = lambda: setup_mod.download_model()  # calls the real function with patched path
+        # Redirect the function's path reference
+        import _embedding as emb
+        monkeypatch.setattr(emb, "LOCAL_MODEL_PATH", fake_model_dir)
+        monkeypatch.setattr(setup_mod, "LOCAL_MODEL_PATH", fake_model_dir)
+
+        setup_mod.download_model()
+        captured = capsys.readouterr()
+        assert "nothing to do" in captured.out.lower() or "already present" in captured.out
+
+    def test_download_creates_directory_and_calls_save(self, monkeypatch, tmp_path):
+        """download_model() creates models/ and saves the model."""
+        import setup as setup_mod
+        import _embedding as emb
+
+        target_dir = tmp_path / "models" / MODEL_NAME
+        monkeypatch.setattr(setup_mod, "LOCAL_MODEL_PATH", target_dir)
+        monkeypatch.setattr(emb, "LOCAL_MODEL_PATH", target_dir)
+
+        saved_to = []
+
+        class _FakeModel:
+            def save(self, path):
+                Path(path).mkdir(parents=True, exist_ok=True)
+                saved_to.append(path)
+
+        import sentence_transformers as st_mod
+        monkeypatch.setattr(st_mod, "SentenceTransformer", lambda name: _FakeModel())
+
+        setup_mod.download_model()
+        assert len(saved_to) == 1
+        assert saved_to[0] == str(target_dir)
+
+
+# ---------------------------------------------------------------------------
+# db.py export / import round-trip
+# ---------------------------------------------------------------------------
+
+class TestDbExportImport:
+    def _dummy_ef(self):
+        from chromadb.api.types import EmbeddingFunction  # type: ignore
+
+        class _DummyEF(EmbeddingFunction):
+            def __init__(self):
+                pass
+
+            @staticmethod
+            def name() -> str:
+                return "dummy"
+
+            def __call__(self, input):  # noqa: A002
+                return [[0.1, 0.2, 0.3] for _ in input]
+
+            @classmethod
+            def build_from_config(cls, config):
+                return cls()
+
+            def get_config(self):
+                return {}
+
+        return _DummyEF()
+
+    def _make_chunks(self, n: int = 4) -> list[dict]:
+        return [
+            {
+                "id": f"exp-chunk-{i}",
+                "source": "test.md",
+                "category": "general",
+                "title": f"Doc {i}",
+                "text": f"Export test content number {i}.",
+                "metadata": {"extra": str(i)},
+            }
+            for i in range(n)
+        ]
+
+    def test_export_creates_jsonl(self, tmp_path):
+        ef = self._dummy_ef()
+        db_path = str(tmp_path / "chroma")
+        chunks = self._make_chunks(3)
+        upsert_chunks(chunks, db_path=db_path, collection_name="col", embedding_function=ef)
+
+        out = tmp_path / "snap.jsonl"
+        count = export_db(db_path, "col", out)
+        assert count == 3
+        assert out.exists()
+        lines = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+        assert len(lines) == 3
+
+    def test_export_preserves_fields(self, tmp_path):
+        ef = self._dummy_ef()
+        db_path = str(tmp_path / "chroma")
+        chunks = self._make_chunks(2)
+        upsert_chunks(chunks, db_path=db_path, collection_name="col", embedding_function=ef)
+
+        out = tmp_path / "snap.jsonl"
+        export_db(db_path, "col", out)
+        lines = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+        for record in lines:
+            assert "id" in record
+            assert "source" in record
+            assert "category" in record
+            assert "title" in record
+            assert "text" in record
+
+    def test_import_round_trip(self, tmp_path, monkeypatch):
+        """Export from one DB, import into another, verify counts match."""
+        import db as db_mod
+        monkeypatch.setattr(db_mod, "get_embedding_function", self._dummy_ef)
+
+        ef = self._dummy_ef()
+        src_db = str(tmp_path / "src_chroma")
+        dst_db = str(tmp_path / "dst_chroma")
+        chunks = self._make_chunks(5)
+        upsert_chunks(chunks, db_path=src_db, collection_name="col", embedding_function=ef)
+
+        snap = tmp_path / "snap.jsonl"
+        export_db(src_db, "col", snap)
+        import_count = import_db(snap, dst_db, "col")
+        assert import_count == 5
+
+        import chromadb  # type: ignore
+        client = chromadb.PersistentClient(path=dst_db)
+        col = client.get_collection("col")
+        assert col.count() == 5
+
+    def test_export_empty_collection(self, tmp_path, capsys):
+        ef = self._dummy_ef()
+        db_path = str(tmp_path / "chroma")
+        upsert_chunks([], db_path=db_path, collection_name="col", embedding_function=ef)
+
+        # Manually create an empty collection
+        import chromadb  # type: ignore
+        client = chromadb.PersistentClient(path=db_path)
+        client.get_or_create_collection("empty_col")
+
+        out = tmp_path / "snap.jsonl"
+        count = export_db(db_path, "empty_col", out)
+        assert count == 0
+
+    def test_import_missing_file_exits(self, tmp_path):
+        with pytest.raises(SystemExit):
+            import_db(tmp_path / "nonexistent.jsonl", str(tmp_path / "chroma"), "col")
+
 

@@ -126,7 +126,7 @@ def main() -> None:
 
     index_dir = Path(args.index_dir)
     app = _build_app(index_dir)
-    print(f"smart-brain API running on http://{args.host}:{args.port}")
+    print(f"Smart-Brain API running on http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port)
 
 
