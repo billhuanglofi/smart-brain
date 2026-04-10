@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Generated index artifacts (rebuilt locally via scripts/ingest.py)
+index/
+
+# ChromaDB persistent storage
+chroma_db/
+
+# Embedding model weights (downloaded once by scripts/setup.py; ~90 MB per model)
+models/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# dotenv
+.env

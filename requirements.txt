@@ -1,0 +1,22 @@
+# File parsing
+openpyxl>=3.1.0          # read .xlsx files
+xlrd>=2.0.1              # read legacy .xls files
+markdown>=3.5.0          # convert Markdown to plain text
+beautifulsoup4>=4.12.0   # strip HTML tags from rendered Markdown
+pandas>=2.0.0            # tabular data helpers for Excel and CSV
+
+# Embedding model (used for all vector operations)
+sentence-transformers>=2.7.0
+numpy>=1.26.0
+
+# Vector database (local, no server required)
+chromadb>=0.4.0
+
+# HTTP requests (Jira / Confluence connectors)
+requests>=2.31.0
+
+# Credentials from .env file
+python-dotenv>=1.0.0
+
+# HTTP server (optional – only needed when running scripts/serve.py)
+flask>=3.0.0
