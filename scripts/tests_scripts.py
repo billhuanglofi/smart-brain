@@ -26,6 +26,7 @@ from upload import (  # noqa: E402
 from _embedding import LOCAL_MODEL_PATH, MODEL_NAME, get_embedding_function  # noqa: E402
 from db import export_db, import_db  # noqa: E402
 from setup import download_model  # noqa: E402
+import serve as serve_mod  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -613,5 +614,160 @@ class TestDbExportImport:
     def test_import_missing_file_exits(self, tmp_path):
         with pytest.raises(SystemExit):
             import_db(tmp_path / "nonexistent.jsonl", str(tmp_path / "chroma"), "col")
+
+
+# ---------------------------------------------------------------------------
+# serve.py HTTP API
+# ---------------------------------------------------------------------------
+
+class TestServeChromaDB:
+    """Tests for serve.py using the ChromaDB backend."""
+
+    def _dummy_ef(self):
+        from chromadb.api.types import EmbeddingFunction  # type: ignore
+
+        class _DummyEF(EmbeddingFunction):
+            def __init__(self):
+                pass
+
+            @staticmethod
+            def name() -> str:
+                return "dummy"
+
+            def __call__(self, input):  # noqa: A002
+                return [[0.1, 0.2, 0.3] for _ in input]
+
+            @classmethod
+            def build_from_config(cls, config):
+                return cls()
+
+            def get_config(self):
+                return {}
+
+        return _DummyEF()
+
+    def _make_chunks(self, n: int = 3) -> list[dict]:
+        return [
+            {
+                "id": f"serve-chunk-{i}",
+                "source": "test.md",
+                "category": "general",
+                "title": f"Doc {i}",
+                "text": f"Serve test content number {i}.",
+                "metadata": {},
+            }
+            for i in range(n)
+        ]
+
+    def _build_test_app(self, tmp_path, monkeypatch):
+        """Create a populated ChromaDB and return a Flask test client."""
+        ef = self._dummy_ef()
+        db_path = str(tmp_path / "chroma")
+        upsert_chunks(self._make_chunks(3), db_path=db_path, collection_name="col", embedding_function=ef)
+
+        # Patch get_embedding_function so the server doesn't try to load the real model
+        import _embedding as emb
+        monkeypatch.setattr(emb, "get_embedding_function", self._dummy_ef)
+
+        app = serve_mod._build_app(db_path=db_path, collection_name="col", index_dir=Path("/unused"))
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    def test_health_endpoint(self, tmp_path, monkeypatch):
+        client = self._build_test_app(tmp_path, monkeypatch)
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"status": "ok"}
+
+    def test_search_get_returns_results(self, tmp_path, monkeypatch):
+        client = self._build_test_app(tmp_path, monkeypatch)
+        resp = client.get("/search?q=content")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) > 0
+
+    def test_search_get_missing_query_returns_400(self, tmp_path, monkeypatch):
+        client = self._build_test_app(tmp_path, monkeypatch)
+        resp = client.get("/search")
+        assert resp.status_code == 400
+
+    def test_search_post_returns_results(self, tmp_path, monkeypatch):
+        client = self._build_test_app(tmp_path, monkeypatch)
+        resp = client.post("/search", json={"query": "content", "top_k": 2})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+
+    def test_search_post_missing_query_returns_400(self, tmp_path, monkeypatch):
+        client = self._build_test_app(tmp_path, monkeypatch)
+        resp = client.post("/search", json={"top_k": 2})
+        assert resp.status_code == 400
+
+    def test_categories_endpoint(self, tmp_path, monkeypatch):
+        client = self._build_test_app(tmp_path, monkeypatch)
+        resp = client.get("/categories")
+        assert resp.status_code == 200
+        cats = resp.get_json()
+        assert isinstance(cats, list)
+        assert "general" in cats
+
+    def test_search_result_has_required_fields(self, tmp_path, monkeypatch):
+        client = self._build_test_app(tmp_path, monkeypatch)
+        resp = client.get("/search?q=content")
+        results = resp.get_json()
+        assert len(results) > 0
+        for r in results:
+            assert "id" in r
+            assert "source" in r
+            assert "category" in r
+            assert "title" in r
+            assert "text" in r
+            assert "score" in r
+
+
+class TestServeLegacyJSONL:
+    """Tests for serve.py using the legacy JSONL backend."""
+
+    def _build_test_app(self, index_dir: Path):
+        app = serve_mod._build_app(db_path=None, collection_name="knowledge", index_dir=index_dir)
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    def _write_chunks(self, index_dir: Path, n: int = 3):
+        index_dir.mkdir(parents=True, exist_ok=True)
+        chunks_path = index_dir / "chunks.jsonl"
+        with chunks_path.open("w") as f:
+            for i in range(n):
+                record = {
+                    "id": f"legacy-{i}",
+                    "source": "test.md",
+                    "category": "general",
+                    "title": f"Doc {i}",
+                    "text": f"Legacy content number {i} with keyword alpha.",
+                }
+                f.write(json.dumps(record) + "\n")
+
+    def test_health_endpoint(self, tmp_path):
+        self._write_chunks(tmp_path / "index")
+        client = self._build_test_app(tmp_path / "index")
+        resp = client.get("/health")
+        assert resp.status_code == 200
+
+    def test_search_keyword(self, tmp_path):
+        self._write_chunks(tmp_path / "index")
+        client = self._build_test_app(tmp_path / "index")
+        resp = client.get("/search?q=alpha")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) > 0
+
+    def test_categories(self, tmp_path):
+        self._write_chunks(tmp_path / "index")
+        client = self._build_test_app(tmp_path / "index")
+        resp = client.get("/categories")
+        assert resp.status_code == 200
+        assert "general" in resp.get_json()
 
 

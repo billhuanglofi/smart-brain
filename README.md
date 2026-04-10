@@ -19,9 +19,8 @@ your machine — no cloud services, no GitHub Actions required.
    - [Fetch a Confluence page](#fetch-a-confluence-page)
 5. [Searching the database](#searching-the-database)
 6. [Migrating to a new machine](#migrating-to-a-new-machine)
-7. [HTTP API server](#http-api-server)
-8. [Integration with the code-review AI tool](#integration-with-the-code-review-ai-tool)
-9. [Running tests](#running-tests)
+7. [Querying from another project via HTTP](#querying-from-another-project-via-http)
+8. [Running tests](#running-tests)
 
 ---
 
@@ -229,86 +228,123 @@ so it works even after upgrading the embedding model.
 
 ---
 
-## HTTP API server
+## Querying from another project via HTTP
 
-The optional Flask server exposes the knowledge base over HTTP so your
-code-review tool can query it remotely (or from a different process).
+The **recommended way** for another project to query smart-brain is over HTTP.
+Start the server on the smart-brain machine and call it from anywhere.
+
+### 1 — Start the server
 
 ```bash
-pip install flask
-python scripts/serve.py --db-path ./chroma_db --port 5001
+# On the machine where smart-brain lives:
+python scripts/serve.py --db-path ./chroma_db
+# Smart-Brain API running on http://0.0.0.0:5001  [ChromaDB at ./chroma_db]
 ```
+
+Custom port or bind address:
+
+```bash
+python scripts/serve.py --db-path ./chroma_db --host 0.0.0.0 --port 5001
+```
+
+### 2 — Available endpoints
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/health` | Health check |
-| GET | `/categories` | List categories in the index |
-| GET | `/search?q=…&top_k=5&category=jira` | Search |
-| POST | `/search` | Search with JSON body |
+| GET | `/health` | Returns `{"status": "ok"}` — use for liveness checks |
+| GET | `/categories` | JSON array of distinct category names in the database |
+| GET | `/search?q=…` | Semantic search; optional `&top_k=5` and `&category=jira` |
+| POST | `/search` | Same search with a JSON body |
 
----
+### 3 — Call from any language
 
-## Integration with the code-review AI tool
-
-Add this helper to your existing code-review Python project:
+**Python (copy-paste into your other project):**
 
 ```python
-"""knowledge_context.py – paste into your code-review project."""
-
 import requests
 
-BRAIN_URL = "http://localhost:5001"   # URL where scripts/serve.py is running
+BRAIN_URL = "http://localhost:5001"   # change to hostname/IP if on another machine
 
 
-def get_knowledge_context(pr_diff: str, top_k: int = 5) -> str:
-    """
-    Fetch the most relevant internal knowledge for a PR diff and return it
-    as a formatted string ready to inject into an LLM prompt.
-    """
-    try:
-        resp = requests.get(
-            f"{BRAIN_URL}/search",
-            params={"q": pr_diff[:500], "top_k": top_k},
-            timeout=5,
-        )
-        resp.raise_for_status()
-        chunks = resp.json()
-    except requests.RequestException:
-        return ""   # degrade gracefully when the brain is unavailable
+def query_knowledge(query: str, top_k: int = 5, category: str | None = None) -> list[dict]:
+    """Return a list of relevant knowledge chunks from smart-brain."""
+    params = {"q": query, "top_k": top_k}
+    if category:
+        params["category"] = category
+    resp = requests.get(f"{BRAIN_URL}/search", params=params, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 
-    if not chunks:
-        return ""
 
-    lines = ["### Relevant internal knowledge\n"]
-    for c in chunks:
-        lines.append(f"**[{c['category']}] {c['title']}**")
-        lines.append(c["text"][:400])
-        lines.append("")
-    return "\n".join(lines)
+# Example
+chunks = query_knowledge("JWT token refresh", top_k=3)
+for c in chunks:
+    print(f"[{c['category']}] {c['title']}  (score={c['score']:.2f})")
+    print(c["text"][:200])
+    print()
 ```
 
-Inject the returned string into your review prompt:
+**POST (richer filtering):**
 
 ```python
-from knowledge_context import get_knowledge_context
+resp = requests.post(
+    f"{BRAIN_URL}/search",
+    json={"query": "authentication flow", "top_k": 5, "category": "confluence"},
+)
+chunks = resp.json()
+```
 
+**curl:**
+
+```bash
+curl "http://localhost:5001/search?q=authentication+flow&top_k=3"
+curl -X POST http://localhost:5001/search \
+     -H "Content-Type: application/json" \
+     -d '{"query": "sprint velocity", "top_k": 5, "category": "jira"}'
+```
+
+### 4 — Response format
+
+Each item in the returned array:
+
+```json
+{
+  "id": "a1b2c3d4",
+  "source": "jira:PROJ-123",
+  "category": "jira",
+  "title": "Fix authentication timeout",
+  "text": "...",
+  "metadata": {"issue_key": "PROJ-123", "url": "https://..."},
+  "score": 0.94
+}
+```
+
+Higher `score` (max 1.0) means more semantically similar to your query.
+
+### 5 — Integration example: inject into an LLM prompt
+
+```python
 def build_review_prompt(pr_diff: str) -> str:
-    context = get_knowledge_context(pr_diff)
+    chunks = query_knowledge(pr_diff[:500], top_k=5)
+    context = "\n".join(
+        f"[{c['category']}] {c['title']}\n{c['text'][:400]}"
+        for c in chunks
+    )
     return f"""You are a senior software engineer performing a code review.
 
+### Relevant internal knowledge
 {context}
 
 ## Pull request diff
 {pr_diff}
 
-Review the diff above. Focus on correctness, security, and adherence to the
-internal standards described in the knowledge context.
+Review the diff. Focus on correctness, security, and adherence to internal standards.
 """
 ```
 
-### File-based alternative (no HTTP server)
+### File-based alternative (same machine, no HTTP server)
 
-If the code-review tool runs on the same machine you can query ChromaDB directly:
+If your other project runs on the same machine you can import ChromaDB directly:
 
 ```python
 import sys
@@ -319,7 +355,7 @@ from _embedding import get_embedding_function
 
 client = chromadb.PersistentClient(path="/path/to/smart-brain/chroma_db")
 collection = client.get_collection("knowledge", embedding_function=get_embedding_function())
-results = collection.query(query_texts=[pr_diff[:500]], n_results=5)
+results = collection.query(query_texts=["your query"], n_results=5)
 context = "\n".join(results["documents"][0])
 ```
 
@@ -331,5 +367,3 @@ context = "\n".join(results["documents"][0])
 pip install pytest
 pytest scripts/tests_scripts.py -v
 ```
-
-
