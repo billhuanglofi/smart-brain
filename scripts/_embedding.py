@@ -16,12 +16,20 @@ Location preference
 To avoid the download entirely, run the one-time setup:
 
     python scripts/setup.py
+
+ONNX Runtime note
+-----------------
+On some Windows machines the ONNX Runtime DLLs cannot be loaded (missing
+Visual C++ Redistributable, architecture mismatch, etc.).  When that
+happens the helper automatically falls back to the PyTorch backend so
+that the model still works without requiring users to debug DLL issues.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import List
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
@@ -30,12 +38,61 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 LOCAL_MODEL_PATH = _REPO_ROOT / "models" / MODEL_NAME
 
 
+def _is_onnx_error(exc: BaseException) -> bool:
+    """Return *True* if *exc* looks like an ONNX Runtime loading failure.
+
+    Checks for common Windows DLL-loading patterns as well as a missing
+    ``onnxruntime`` package.  The patterns are intentionally specific to
+    avoid swallowing unrelated errors that merely *mention* ONNX.
+    """
+    msg = str(exc).lower()
+    # Direct onnxruntime import / DLL failures
+    if "onnxruntime" in msg:
+        return True
+    # Broader "onnx" only when combined with loader-related keywords
+    if "onnx" in msg and any(
+        kw in msg for kw in ("dll", "load", "module", "not found", "import")
+    ):
+        return True
+    return False
+
+
+class _PyTorchEmbeddingFunction:
+    """ChromaDB-compatible embedding function backed by PyTorch (no ONNX)."""
+
+    def __init__(self, model_name: str) -> None:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+
+        self.model_name = model_name
+        self._model = SentenceTransformer(model_name, backend="torch")
+
+    def __call__(self, input: List[str]) -> List[List[float]]:  # noqa: A002
+        embeddings = self._model.encode(list(input), convert_to_numpy=True)
+        return embeddings.tolist()
+
+
+def _resolve_model_path() -> str:
+    """Return the model identifier: local path when available, else HF name."""
+    if LOCAL_MODEL_PATH.exists():
+        return str(LOCAL_MODEL_PATH)
+
+    print(
+        f"[INFO] Local model not found at '{LOCAL_MODEL_PATH}'.\n"
+        "       Run  python scripts/setup.py  once to bundle it in the repo.\n"
+        "       Falling back to Hugging Face download …",
+        file=sys.stderr,
+    )
+    return MODEL_NAME
+
+
 def get_embedding_function():
     """
-    Return a ChromaDB-compatible ``SentenceTransformerEmbeddingFunction``.
+    Return a ChromaDB-compatible embedding function.
 
-    Uses the local model copy when available (after running setup.py),
-    otherwise falls back to downloading from Hugging Face.
+    Tries ChromaDB's built-in ``SentenceTransformerEmbeddingFunction`` first.
+    If ONNX Runtime fails (common on Windows when the required DLLs are
+    missing), it falls back to a pure-PyTorch embedding function
+    automatically.
     """
     try:
         from chromadb.utils.embedding_functions.sentence_transformer_embedding_function import (  # type: ignore
@@ -49,15 +106,19 @@ def get_embedding_function():
         )
         sys.exit(1)
 
-    if LOCAL_MODEL_PATH.exists():
-        model_path = str(LOCAL_MODEL_PATH)
-    else:
+    model_path = _resolve_model_path()
+
+    # --- First attempt: default backend (may use ONNX Runtime) -----------
+    try:
+        return SentenceTransformerEmbeddingFunction(model_name=model_path)
+    except Exception as exc:
+        if not _is_onnx_error(exc):
+            raise
         print(
-            f"[INFO] Local model not found at '{LOCAL_MODEL_PATH}'.\n"
-            "       Run  python scripts/setup.py  once to bundle it in the repo.\n"
-            "       Falling back to Hugging Face download …",
+            f"[WARN] ONNX Runtime could not be loaded ({exc}).\n"
+            "       Falling back to PyTorch backend …",
             file=sys.stderr,
         )
-        model_path = MODEL_NAME
 
-    return SentenceTransformerEmbeddingFunction(model_name=model_path)
+    # --- Fallback: explicit PyTorch backend ------------------------------
+    return _PyTorchEmbeddingFunction(model_path)

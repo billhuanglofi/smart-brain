@@ -458,6 +458,60 @@ class TestEmbeddingHelper:
         ef = get_embedding_function()
         assert ef.model_name == str(fake_model_dir)  # uses local path, not MODEL_NAME
 
+    def test_onnx_error_falls_back_to_pytorch(self, monkeypatch, tmp_path):
+        """When SentenceTransformerEmbeddingFunction raises an ONNX error,
+        get_embedding_function() falls back to _PyTorchEmbeddingFunction."""
+        import _embedding as emb
+
+        monkeypatch.setattr(emb, "LOCAL_MODEL_PATH", Path("/nonexistent/path"))
+
+        # Simulate ONNX Runtime DLL failure
+        def _raise_onnx(model_name):
+            raise OSError("onnxruntime DLL load failed: module not found")
+
+        import chromadb.utils.embedding_functions.sentence_transformer_embedding_function as st_mod
+        monkeypatch.setattr(st_mod, "SentenceTransformerEmbeddingFunction", _raise_onnx)
+
+        # Also mock _PyTorchEmbeddingFunction so we don't actually load the model
+        class _FakePyTorchEF:
+            def __init__(self, model_name):
+                self.model_name = model_name
+            def __call__(self, inputs):
+                return [[0.2] for _ in inputs]
+
+        monkeypatch.setattr(emb, "_PyTorchEmbeddingFunction", _FakePyTorchEF)
+
+        ef = get_embedding_function()
+        assert callable(ef)
+        assert isinstance(ef, _FakePyTorchEF)
+        assert ef.model_name == MODEL_NAME
+
+    def test_non_onnx_error_is_not_swallowed(self, monkeypatch):
+        """A non-ONNX error from the embedding constructor should propagate."""
+        import _embedding as emb
+
+        monkeypatch.setattr(emb, "LOCAL_MODEL_PATH", Path("/nonexistent/path"))
+
+        def _raise_generic(model_name):
+            raise ValueError("something unrelated")
+
+        import chromadb.utils.embedding_functions.sentence_transformer_embedding_function as st_mod
+        monkeypatch.setattr(st_mod, "SentenceTransformerEmbeddingFunction", _raise_generic)
+
+        with pytest.raises(ValueError, match="something unrelated"):
+            get_embedding_function()
+
+    def test_is_onnx_error_detects_onnx_messages(self):
+        from _embedding import _is_onnx_error
+
+        assert _is_onnx_error(OSError("onnxruntime_pybind11_state DLL load failed"))
+        assert _is_onnx_error(ImportError("No module named 'onnxruntime'"))
+        assert _is_onnx_error(OSError("ONNX Runtime: DLL not found"))
+        assert _is_onnx_error(OSError("ONNX module load failed"))
+        assert not _is_onnx_error(ValueError("something else entirely"))
+        # A vague mention of "onnx" without loader keywords should not match
+        assert not _is_onnx_error(ValueError("Failed to proxy onnx request"))
+
 
 # ---------------------------------------------------------------------------
 # setup.py
@@ -499,11 +553,44 @@ class TestSetupDownloadModel:
                 saved_to.append(path)
 
         import sentence_transformers as st_mod
-        monkeypatch.setattr(st_mod, "SentenceTransformer", lambda name: _FakeModel())
+        monkeypatch.setattr(st_mod, "SentenceTransformer", lambda name, **kw: _FakeModel())
 
         setup_mod.download_model()
         assert len(saved_to) == 1
         assert saved_to[0] == str(target_dir)
+
+    def test_download_falls_back_on_onnx_error(self, monkeypatch, tmp_path):
+        """download_model() retries with backend='torch' when ONNX fails."""
+        import setup as setup_mod
+        import _embedding as emb
+
+        target_dir = tmp_path / "models" / MODEL_NAME
+        monkeypatch.setattr(setup_mod, "LOCAL_MODEL_PATH", target_dir)
+        monkeypatch.setattr(emb, "LOCAL_MODEL_PATH", target_dir)
+
+        saved_to = []
+        call_args = []
+
+        class _FakeModel:
+            def save(self, path):
+                Path(path).mkdir(parents=True, exist_ok=True)
+                saved_to.append(path)
+
+        def _fake_st(name, **kwargs):
+            call_args.append(kwargs)
+            if "backend" not in kwargs:
+                raise OSError("onnxruntime DLL load failed: module not found")
+            return _FakeModel()
+
+        import sentence_transformers as st_mod
+        monkeypatch.setattr(st_mod, "SentenceTransformer", _fake_st)
+
+        setup_mod.download_model()
+        assert len(saved_to) == 1
+        assert saved_to[0] == str(target_dir)
+        # Verify it was called twice: once without backend, once with torch
+        assert len(call_args) == 2
+        assert call_args[1].get("backend") == "torch"
 
 
 # ---------------------------------------------------------------------------

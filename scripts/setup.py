@@ -39,13 +39,27 @@ def download_model() -> None:
         )
         sys.exit(1)
 
+    from _embedding import _is_onnx_error  # noqa: E402
+
     if LOCAL_MODEL_PATH.exists():
         print(f"✓ Model already present at {LOCAL_MODEL_PATH}  (nothing to do)")
         return
 
     LOCAL_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     print(f"  Downloading '{MODEL_NAME}' (~90 MB) from Hugging Face …")
-    model = SentenceTransformer(MODEL_NAME)
+
+    try:
+        model = SentenceTransformer(MODEL_NAME)
+    except Exception as exc:
+        if not _is_onnx_error(exc):
+            raise
+        print(
+            f"[WARN] ONNX Runtime could not be loaded ({exc}).\n"
+            "       Retrying with PyTorch backend …",
+            file=sys.stderr,
+        )
+        model = SentenceTransformer(MODEL_NAME, backend="torch")
+
     model.save(str(LOCAL_MODEL_PATH))
     print(f"✓ Model saved to {LOCAL_MODEL_PATH}")
     print("  You can now run upload.py and search.py fully offline.")
