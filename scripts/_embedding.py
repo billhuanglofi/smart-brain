@@ -39,9 +39,22 @@ LOCAL_MODEL_PATH = _REPO_ROOT / "models" / MODEL_NAME
 
 
 def _is_onnx_error(exc: BaseException) -> bool:
-    """Return *True* if *exc* looks like an ONNX Runtime loading failure."""
+    """Return *True* if *exc* looks like an ONNX Runtime loading failure.
+
+    Checks for common Windows DLL-loading patterns as well as a missing
+    ``onnxruntime`` package.  The patterns are intentionally specific to
+    avoid swallowing unrelated errors that merely *mention* ONNX.
+    """
     msg = str(exc).lower()
-    return "onnx" in msg or "onnxruntime" in msg
+    # Direct onnxruntime import / DLL failures
+    if "onnxruntime" in msg:
+        return True
+    # Broader "onnx" only when combined with loader-related keywords
+    if "onnx" in msg and any(
+        kw in msg for kw in ("dll", "load", "module", "not found", "import")
+    ):
+        return True
+    return False
 
 
 class _PyTorchEmbeddingFunction:

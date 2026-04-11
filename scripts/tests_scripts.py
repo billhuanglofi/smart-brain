@@ -507,7 +507,10 @@ class TestEmbeddingHelper:
         assert _is_onnx_error(OSError("onnxruntime_pybind11_state DLL load failed"))
         assert _is_onnx_error(ImportError("No module named 'onnxruntime'"))
         assert _is_onnx_error(OSError("ONNX Runtime: DLL not found"))
+        assert _is_onnx_error(OSError("ONNX module load failed"))
         assert not _is_onnx_error(ValueError("something else entirely"))
+        # A vague mention of "onnx" without loader keywords should not match
+        assert not _is_onnx_error(ValueError("Failed to proxy onnx request"))
 
 
 # ---------------------------------------------------------------------------
